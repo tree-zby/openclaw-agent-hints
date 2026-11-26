@@ -1,0 +1,89 @@
+diff --git a/src/agents/embedded-agent-runner/model-request-hook.ts b/src/agents/embedded-agent-runner/model-request-hook.ts
+index f2b7525e..2b14cd5f 100644
+--- a/src/agents/embedded-agent-runner/model-request-hook.ts
++++ b/src/agents/embedded-agent-runner/model-request-hook.ts
+@@ -40,6 +40,26 @@ function readProtectedFields(payload: unknown): string {
+   return JSON.stringify(fields);
+ }
+ 
++/** Host headers stay inside the `x-` namespace and must be header-safe. */
++function sanitizeExtraHeaders(
++  headers: Record<string, string> | undefined,
++): Record<string, string> | undefined {
++  if (!headers) {
++    return undefined;
++  }
++  const safe: Record<string, string> = {};
++  for (const [name, value] of Object.entries(headers)) {
++    if (!/^x-[a-z0-9-]{1,64}$/i.test(name)) {
++      continue;
++    }
++    if (typeof value !== "string" || value.length > 4096 || /[\r\n\0]/.test(value)) {
++      continue;
++    }
++    safe[name] = value;
++  }
++  return Object.keys(safe).length > 0 ? safe : undefined;
++}
++
+ /** Policy sees final provider bytes and a detached copy of host message provenance. */
+ function createModelRequestTransformer(
+   hookContext: PluginHookAgentContext,
+@@ -68,6 +88,11 @@ function createModelRequestTransformer(
+       },
+       hookContext,
+     );
++    const extraHeaders = sanitizeExtraHeaders(result?.headers);
++    if (extraHeaders && options) {
++      // Mutate in place: the caller shares this object with the transport options.
++      Object.assign((options.headers ??= {}), extraHeaders);
++    }
+     const effective = result ? result.payload : payload;
+     if (readProtectedFields(effective) !== admitted) {
+       throw new Error(
+diff --git a/src/agents/embedded-agent-runner/provider-prompt-state.ts b/src/agents/embedded-agent-runner/provider-prompt-state.ts
+index a21976c9..ac1ed5dc 100644
+--- a/src/agents/embedded-agent-runner/provider-prompt-state.ts
++++ b/src/agents/embedded-agent-runner/provider-prompt-state.ts
+@@ -239,6 +239,10 @@ export function wrapStreamFnWithProviderPromptState(params: {
+     const originalOnPayload = options?.onPayload;
+     const observedOptions: NonNullable<Parameters<StreamFn>[2]> = {
+       ...options,
++      // Stable object so a request gate can add outbound headers before the
++      // provider builds its wire request (the spread above would copy a later
++      // reassignment, but shares this object by reference).
++      headers: options?.headers ?? {},
+       onPayload: async (payload, payloadModel) => {
+         const replacement = await originalOnPayload?.(payload, payloadModel);
+         const preparedPayload = replacement === undefined ? payload : replacement;
+@@ -258,7 +262,7 @@ export function wrapStreamFnWithProviderPromptState(params: {
+           return preparedPayload;
+         }
+         const finalPayload = params.transformPayload
+-          ? await params.transformPayload(preparedPayload, payloadModel, context, options)
++          ? await params.transformPayload(preparedPayload, payloadModel, context, observedOptions)
+           : preparedPayload;
+         options?.signal?.throwIfAborted();
+         await recordProviderPrompt({
+diff --git a/src/plugins/hook-model.types.ts b/src/plugins/hook-model.types.ts
+index 7582e31e..329f3294 100644
+--- a/src/plugins/hook-model.types.ts
++++ b/src/plugins/hook-model.types.ts
+@@ -36,8 +36,16 @@ export type PluginHookBeforeModelRequestEvent = {
+ /**
+  * Replacement payload. Return nothing to send the current payload unchanged. A CLI
+  * replacement must keep the `{ prompt, prependContext?, appendContext? }` string shape.
++ *
++ * `headers` adds outbound HTTP headers to an embedded model request, merged over
++ * provider defaults after the payload is admitted. Only `x-` names are accepted and
++ * values must be free of control characters; anything else is dropped. The field is
++ * ignored on CLI runtimes, which own their own wire request.
+  */
+-export type PluginHookBeforeModelRequestResult = { payload: unknown };
++export type PluginHookBeforeModelRequestResult = {
++  payload: unknown;
++  headers?: Record<string, string>;
++};
+ 
+ // Leaf contract: hook-types.ts imports this file, so it must not import hook-types.ts.
+ export type ModelRequestHooks = {

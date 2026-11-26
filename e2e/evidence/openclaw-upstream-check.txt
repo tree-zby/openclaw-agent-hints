@@ -1,0 +1,54 @@
+OpenClaw patch validation
+=========================
+
+Upstream: openclaw/openclaw @ 69b78d624113eb615500c38a6ce08e4636698522
+          (2026-11-25, "test(ui): defer only the Systems inventory read in the overview e2e")
+Patch:    patches/0001-model-request-headers.patch
+          (3 files, 89 diff lines, 39 added / 2 removed)
+
+Why this file exists
+--------------------
+OpenClaw's workspace is ~17 GB and this repository cannot install it in CI. The
+patch is therefore validated in two ways that do not require the full build:
+
+1. git apply --check, against a clean checkout of the pinned revision
+2. a TypeScript parse of the three touched files (esbuild 0.25.0, Node 24)
+
+Commands:
+
+    cd ~/research/openclaw
+    git apply patches/0001-model-request-headers.patch
+    git diff --stat
+      src/agents/embedded-agent-runner/model-request-hook.ts    | 25 +++++++++++++++++++
+      src/agents/embedded-agent-runner/provider-prompt-state.ts |  6 ++++-
+      src/plugins/hook-model.types.ts                           | 10 +++++--
+      3 files changed, 39 insertions(+), 2 deletions(-)
+    git checkout -- src
+    git apply --check patches/0001-model-request-headers.patch
+      APPLY_OK
+
+    npx esbuild@0.25.0 model-request-hook.ts provider-prompt-state.ts \
+        hook-model.types.ts --outdir=out --format=esm
+      exit 0, no diagnostics
+
+Not performed
+-------------
+- Full OpenClaw type check (`tsc`) or unit suite: the workspace cannot be installed
+  here, so type-level correctness rests on manual review of the diff plus the
+  parse above.
+- A framework end-to-end run. The wire evidence in openclaw.json comes from this
+  package's own HTTP stub, where the harness is emulated at the seam the patch
+  creates: `before_model_request` returns `{ payload, headers }`, the runner
+  merges them into `StreamOptions.headers`.
+
+What the patch does
+-------------------
+1. hook-model.types.ts
+   `PluginHookBeforeModelRequestResult` gains `headers?: Record<string, string>`.
+2. provider-prompt-state.ts
+   Seeds `headers: options?.headers ?? {}` on the observed stream options so the
+   object survives the runner's later `{...options}` spread, and passes those
+   options (not the pre-wrap object) to `transformPayload`.
+3. model-request-hook.ts
+   Sanitises returned headers to `x-` names without control characters and
+   merges them in place into the shared options object.
