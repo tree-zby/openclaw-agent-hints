@@ -1,5 +1,7 @@
 node_modules/
-t.txt
-w.txt
 npm-debug.log*
 .DS_Store
+
+# Local scratch output
+/t*.txt
+/w*.txt
